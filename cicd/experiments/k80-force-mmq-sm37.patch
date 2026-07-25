@@ -1,0 +1,26 @@
+diff --git a/ml/backend/ggml/ggml/src/ggml-cuda/mmq.cu b/ml/backend/ggml/ggml/src/ggml-cuda/mmq.cu
+--- a/ml/backend/ggml/ggml/src/ggml-cuda/mmq.cu
++++ b/ml/backend/ggml/ggml/src/ggml-cuda/mmq.cu
+@@ -443,14 +443,18 @@ bool ggml_cuda_should_use_mmq(enum ggml_type type, int cc, int64_t ne11) {
+     if (turing_mma_available(cc)) {
+         return true;
+     }
+ 
+-    if (ggml_cuda_highest_compiled_arch(cc) < GGML_CUDA_CC_DP4A) {
+-        return false;
+-    }
+-
+ #ifdef GGML_CUDA_FORCE_MMQ
++    // Experimental override: allow MMQ to be benchmarked on pre-DP4A GPUs
++    // such as Tesla K80 (sm_37). The kernel uses the software int8 dot-product
++    // fallback there, so this remains an explicit build-time opt-in.
+     return true;
+-#endif //GGML_CUDA_FORCE_MMQ
++#endif // GGML_CUDA_FORCE_MMQ
++
++    if (ggml_cuda_highest_compiled_arch(cc) < GGML_CUDA_CC_DP4A) {
++        return false;
++    }
+ 
+     if (GGML_CUDA_CC_IS_NVIDIA(cc)) {
+         return !fp16_mma_hardware_available(cc) || ne11 < MMQ_DP4A_MAX_BATCH_SIZE;
