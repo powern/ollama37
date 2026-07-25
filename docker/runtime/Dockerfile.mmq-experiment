@@ -1,0 +1,65 @@
+# Ollama37 Tesla K80 forced-MMQ experiment
+#
+# This image is intentionally separate from Dockerfile.local. It applies the
+# controlled sm_37 MMQ selector patch and builds with GGML_CUDA_FORCE_MMQ=ON.
+# Production defaults are not changed.
+#
+# Build:
+#   docker build -f docker/runtime/Dockerfile.mmq-experiment \
+#     -t ollama37:mmq-sm37 .
+
+FROM ollama37-builder AS builder
+
+COPY . /usr/local/src/ollama37
+WORKDIR /usr/local/src/ollama37
+
+ARG GIT_COMMIT=HEAD
+RUN echo "Build commit: ${GIT_COMMIT}" > /tmp/build-commit
+
+# Move the explicit GGML_CUDA_FORCE_MMQ override ahead of the DP4A hardware
+# gate. The normal source tree remains untouched; this only affects this
+# experimental image.
+RUN patch -p1 < cicd/experiments/k80-force-mmq-sm37.patch \
+    && grep -A12 -B4 "GGML_CUDA_FORCE_MMQ" ml/backend/ggml/ggml/src/ggml-cuda/mmq.cu
+
+# Compile native cubins for the CUDA 11 / driver-470 architecture sweep and
+# explicitly enable the experimental MMQ selector.
+RUN bash -c 'LD_LIBRARY_PATH=/usr/local/lib:/usr/local/lib64:/usr/lib64:$LD_LIBRARY_PATH \
+    CC=/usr/local/bin/gcc CXX=/usr/local/bin/g++ \
+    cmake --preset "CUDA 11 K80" -DGGML_CUDA_FORCE_MMQ=ON'
+
+RUN bash -c 'LD_LIBRARY_PATH=/usr/local/lib:/usr/local/lib64:/usr/lib64:$LD_LIBRARY_PATH \
+    CC=/usr/local/bin/gcc CXX=/usr/local/bin/g++ \
+    cmake --build build -j$(nproc)'
+
+RUN cmake --install build --component CPU --strip \
+    && cmake --install build --component CUDA --strip
+
+ARG OLLAMA_VERSION=0.0.0-mmq-sm37
+RUN mkdir -p dist/bin \
+    && go build -ldflags "-X github.com/ollama/ollama/version.Version=${OLLAMA_VERSION}" -o dist/bin/ollama .
+
+FROM rockylinux/rockylinux:8-minimal
+
+RUN microdnf install -y ca-certificates && microdnf clean all
+
+COPY --from=builder /usr/local/src/ollama37/dist/bin/ollama /usr/bin/ollama
+COPY --from=builder /usr/local/src/ollama37/dist/lib/ollama /usr/lib/ollama
+COPY --from=builder /usr/local/lib64/libstdc++.so* /usr/lib64/
+COPY --from=builder /usr/local/lib64/libgcc_s.so* /usr/lib64/
+
+ENV LD_LIBRARY_PATH=/usr/lib/ollama:/usr/local/nvidia/lib:/usr/local/nvidia/lib64
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV OLLAMA_HOST=0.0.0.0:11434
+
+EXPOSE 11434
+
+RUN mkdir -p /root/.ollama
+VOLUME ["/root/.ollama"]
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD /usr/bin/ollama list || exit 1
+
+ENTRYPOINT ["/usr/bin/ollama"]
+CMD ["serve"]
